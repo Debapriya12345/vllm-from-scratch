@@ -140,13 +140,158 @@ It reports throughput (tok/s), mean TTFT, mean and p95 latency, peak GPU memory,
 
 ### Results
 
-> Replace this table with your own numbers. Include the GPU, model, dtype, `--max-tokens` and `--max-slots` you used.
+# Mini-vLLM Benchmark Results
 
-| Setup | Requests | Mode | tok/s | Mean TTFT (s) | Mean latency (s) |
-|---|---|---|---|---|---|
-| _GPU / model_ | 8 | no_cache | _TBD_ | _TBD_ | _TBD_ |
-| _GPU / model_ | 8 | kv_cache | _TBD_ | _TBD_ | _TBD_ |
-| _GPU / model_ | 8 | batched_pool | _TBD_ | _TBD_ | _TBD_ |
+## Overview
+
+This benchmark evaluates the performance of a custom mini-vLLM inference engine implemented with:
+
+- KV Cache
+- Request queue and scheduling
+- Continuous batching / batched request pool
+- Concurrent request execution
+
+The benchmark compares three inference modes:
+
+| Mode | Description |
+|---|---|
+| `no_cache` | Autoregressive generation without KV cache |
+| `kv_cache` | Autoregressive generation using KV cache |
+| `batched_pool` | KV cache with a batching pool and request scheduler |
+
+---
+
+## 1. Single Request Benchmark
+
+**Configuration:** 1 request, 64 maximum generated tokens.
+
+| Mode | Wall Time (s) | Tokens | Throughput (tok/s) | Mean TTFT (s) | Mean Latency (s) | P95 Latency (s) | Peak GPU Memory (GB) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| no_cache | 171.457 | 64 | 0.373 | 1.577 | 171.457 | 171.457 | 0.000 |
+| kv_cache | 10.321 | 64 | 6.201 | 1.854 | 10.321 | 10.321 | 0.000 |
+| batched_pool | 10.816 | 64 | 5.917 | 1.920 | 10.816 | 10.816 | 0.000 |
+
+### Single Request Observations
+
+- KV cache improved throughput from 0.373 tok/s to 6.201 tok/s.
+- KV cache achieved approximately **16.6× higher throughput** than no-cache generation.
+- The batching pool was slightly slower than direct KV-cache inference for a single request.
+- This is expected because batching introduces scheduling and request-management overhead when there is no concurrent workload to batch.
+
+---
+
+## 2. Concurrent Request Benchmark
+
+**Configuration:** 4 concurrent requests, 64 maximum generated tokens per request.
+
+Total expected generated tokens:
+
+`4 requests × 64 tokens = 256 tokens`
+
+| Mode | Wall Time (s) | Tokens | Throughput (tok/s) | Mean TTFT (s) | Mean Latency (s) | P95 Latency (s) | Peak GPU Memory (GB) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| no_cache | 785.180 | 256 | 0.326 | 303.138 | 497.443 | 592.650 | 0.000 |
+| kv_cache | 31.107 | 256 | 8.230 | 13.393 | 19.423 | 23.282 | 0.000 |
+| batched_pool | 19.817 | 256 | 12.918 | 4.322 | 19.762 | 19.817 | 0.000 |
+
+### Concurrent Request Observations
+
+- KV cache achieved approximately **25.2× higher throughput** than no-cache generation.
+- The batching pool achieved approximately **39.6× higher throughput** than no-cache generation.
+- The batching pool achieved approximately **57% higher throughput** than direct KV-cache inference.
+- Total benchmark wall time decreased from 31.107 seconds to 19.817 seconds when using the batching pool.
+- Mean TTFT decreased from 13.393 seconds to 4.322 seconds with the batching pool.
+- Mean request latency remained approximately similar between KV cache and the batching pool.
+
+These results demonstrate the benefit of batching multiple concurrent requests instead of processing them independently.
+
+---
+
+## 3. Throughput Comparison
+
+| Configuration | no_cache | kv_cache | batched_pool |
+|---|---:|---:|---:|
+| 1 request | 0.373 tok/s | 6.201 tok/s | 5.917 tok/s |
+| 4 concurrent requests | 0.326 tok/s | 8.230 tok/s | 12.918 tok/s |
+
+### Throughput Improvement
+
+| Comparison | Improvement |
+|---|---:|
+| KV cache vs no_cache, 1 request | 16.6× |
+| KV cache vs no_cache, 4 requests | 25.2× |
+| Batched pool vs no_cache, 4 requests | 39.6× |
+| Batched pool vs KV cache, 4 requests | 1.57× |
+
+The batching pool performs slightly worse for a single request because of scheduler overhead. Under concurrent load, however, it provides significantly better aggregate throughput.
+
+This behavior is consistent with the goal of continuous batching: improving GPU utilization by processing multiple active requests together.
+
+---
+
+## 4. Key Findings
+
+### KV Cache
+
+KV cache significantly reduces repeated computation during autoregressive generation by reusing previously computed attention keys and values.
+
+The single-request benchmark shows a substantial throughput improvement compared with no-cache generation.
+
+### Continuous Batching
+
+The batching pool demonstrates a clear throughput advantage under concurrent load.
+
+For four concurrent requests:
+
+- Direct KV-cache inference: 8.230 tok/s
+- Batched pool: 12.918 tok/s
+
+This represents approximately a 57% throughput improvement.
+
+### Scheduler Behavior
+
+The batching pool provides better aggregate throughput and lower mean TTFT in the concurrent benchmark.
+
+The next step is to measure active batch size, queue wait time, prefill time, and decode time to understand scheduler behavior in more detail.
+
+---
+
+## 5. Metrics to Improve
+
+The following metrics currently require further validation:
+
+- **Peak GPU Memory:** All results show 0.000 GB. GPU memory measurement may not be implemented or may not be capturing CUDA allocations correctly.
+- **P95 Latency:** The single-request P95 equals total wall time. This suggests the percentile may be calculated from a single sample.
+- **No-cache TTFT:** The concurrent no-cache TTFT is unusually high and should be checked to ensure it measures request arrival to first token correctly.
+
+Future benchmarks should include:
+
+- Queue wait time
+- Prefill duration
+- Decode duration
+- Average decode latency per token
+- Average active batch size
+- Maximum active batch size
+- GPU utilization
+- Peak GPU memory allocation
+
+---
+
+## Conclusion
+
+The benchmark demonstrates two important improvements in the mini-vLLM inference engine:
+
+1. **KV cache** significantly improves autoregressive generation performance by avoiding repeated processing of the entire sequence.
+2. **Continuous batching** improves aggregate throughput when multiple requests are active concurrently.
+
+The current implementation achieves:
+
+- 16.6× higher throughput with KV cache for a single request.
+- 25.2× higher throughput with KV cache for four concurrent requests.
+- 57% higher throughput with the batching pool compared with direct KV-cache inference under four concurrent requests.
+
+The results indicate that the KV-cache and batching components are providing measurable performance benefits. Further work will focus on scheduler metrics, GPU memory tracking, and benchmarking with larger numbers of concurrent requests.
+
 
 ## Limitations
 
